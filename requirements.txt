@@ -1,0 +1,28 @@
+# Bujji — Python dependencies
+# Install with: pip install -r requirements.txt
+# All stages listed; later-stage deps are commented until you reach that stage.
+
+# ── Stage 1: FastAPI + LangGraph agent + SQLite ──────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+python-dotenv==1.0.1
+langgraph>=0.2.60
+langchain-core>=0.3.27
+langchain-ollama>=0.2.2
+langchain-groq>=0.2.3
+httpx==0.28.1
+
+# ── Stage 2: Speech-to-text ───────────────────────────────────────────────────
+faster-whisper==1.1.0
+sounddevice==0.5.1
+numpy>=2.0.0
+
+# ── Stage 3: Text-to-speech ───────────────────────────────────────────────────
+# piper-tts==1.2.0
+
+# ── Stage 4: Wake word ────────────────────────────────────────────────────────
+# pvporcupine==3.0.3
+
+# ── Stage 5: Memory / vector store ───────────────────────────────────────────
+# chromadb==0.5.23

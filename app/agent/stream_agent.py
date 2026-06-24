@@ -1,18 +1,16 @@
 # Streaming agent for the voice pipeline.
 #
-# Plain English: this talks to Groq's LLM and does two jobs in ONE pass:
-#   1. Calls the right tool (add_todo / add_note / set_reminder / remember_preference)
-#      so the action actually happens in the database.
-#   2. Streams a short spoken reply back, sentence by sentence, so Piper can start
-#      talking before the model has finished thinking.
+# Plain English: for each thing you say, this decides between two paths:
+#   1. ACTION — you asked to add a todo / note / reminder (or shared a personal fact).
+#      A fast model (llama-3.1-8b-instant) calls the matching tool; we run it and speak a
+#      short confirmation.
+#   2. QUESTION — anything else: "how are you", "what's the weather", "who won the match".
+#      We route it to Groq's web-enabled "compound" model, which searches the web when
+#      needed and answers. If it can't find an answer, it says so.
 #
-# We use the Groq SDK directly (not LangChain) because we need real token streaming
-# plus native function-calling, and we need it async so it fits the pipeline's
-# producer/consumer tasks.
-#
-# Latency trick: it's a SINGLE LLM round. If the model speaks while calling the tool,
-# we stream those words. If it returns only a tool call (no words), we instantly build
-# a short confirmation from the tool's arguments — no second round-trip to Groq.
+# We use the Groq SDK directly (not LangChain) for real token streaming + native
+# function-calling, async so it fits the pipeline's producer/consumer tasks. Web search
+# uses the SAME Groq key — no extra API key required.
 
 import os
 import re
@@ -37,13 +35,27 @@ load_dotenv()
 MODEL = os.getenv("GROQ_LLM_MODEL", "llama-3.1-8b-instant")
 MAX_TOKENS = 150          # cap output — replies are one or two short sentences
 
-# System prompt — kept deliberately small (well under 200 tokens).
+# Web-enabled model for general questions. Groq's "compound" systems do web search
+# server-side using the SAME Groq key (no extra API key needed). compound-mini is fast.
+COMPOUND_MODEL = os.getenv("GROQ_ANSWER_MODEL", "groq/compound-mini")
+
+# Round-1 prompt: ONLY decide if this is one of the 3 actions. We route everything else
+# (questions, chit-chat, current info) to the web-enabled model. Kept small.
 _SYSTEM = (
-    "You are Sunday, a friendly local voice assistant. You can do exactly three things: "
-    "add todos, add notes, and set reminders. When the user asks for one, call the matching "
-    "tool. If the user reveals a personal fact (name, job, location, a preference), also call "
-    "remember_preference. Always reply out loud in ONE short, warm sentence. If the request "
-    "is not one of your three actions, say so briefly in one sentence."
+    "You are Sunday's intent router. If the user wants to add a to-do, save a note, or set a "
+    "reminder, call the matching tool. If they state a personal fact about themselves (name, "
+    "job, location, a preference), also call remember_preference. For ANYTHING else — questions, "
+    "chit-chat, weather, news, sports, prices, general knowledge — do NOT call any tool; just "
+    "reply 'OK'."
+)
+
+# Round-2 prompt: actually answer a general question, using web search when needed.
+_ANSWER_SYS = (
+    "You are Sunday, a friendly personal voice assistant. Answer concisely — 1 to 2 short "
+    "spoken sentences, suitable for text-to-speech (no markdown, no lists, no URLs). Use web "
+    "search for anything current: weather, news, sports scores, prices, today's events. If "
+    "after trying you still cannot find a reliable answer, reply exactly: 'Sorry, I don't have "
+    "the answer to that.'"
 )
 
 # Tool schemas handed to Groq. These mirror app/agent/database.py inserts.
@@ -187,86 +199,86 @@ def _run_tool_calls(tool_calls: dict[int, dict]) -> list[str]:
 _NO_ACTION = "Sorry, I can only add todos, notes, and reminders right now."
 
 
-async def _stream_attempt(client, messages, t0) -> AsyncIterator[str]:
-    """Streaming path: yield sentences as tokens arrive; run tools at the end."""
-    stream = await client.chat.completions.create(
-        model=MODEL, messages=messages, tools=_TOOLS, tool_choice="auto",
-        max_tokens=MAX_TOKENS, temperature=0.3, stream=True,
-    )
+async def _classify_action(client, transcript: str) -> dict[int, dict]:
+    """Round 1 (fast, non-streaming): does the user want one of the 3 actions?
+    Returns the tool calls to run (empty dict = it's a general question)."""
+    try:
+        resp = await client.chat.completions.create(
+            model=MODEL, messages=_build_messages(transcript),
+            tools=_TOOLS, tool_choice="auto", max_tokens=MAX_TOKENS, temperature=0.1,
+        )
+        msg = resp.choices[0].message
+        return {i: {"name": tc.function.name, "args": tc.function.arguments or ""}
+                for i, tc in enumerate(msg.tool_calls or [])}
+    except Exception as e:
+        print(f"[AGENT] action-classify failed: {str(e)[:90]}")
+        return {}
+
+
+async def _answer_question(client, transcript: str) -> AsyncIterator[str]:
+    """Round 2: answer a general question with the web-enabled model, streamed by sentence.
+    Falls back to 'I don't have the answer' if nothing comes back."""
+    prefs = load_preferences()
+    system = _ANSWER_SYS
+    if prefs:
+        facts = "; ".join(f"{p['key']}={p['value']}" for p in prefs[:5])
+        system = f"{_ANSWER_SYS}\nAbout the user: {facts}."
+
+    t0 = time.perf_counter()
+    first = True
     buffer = ""
     spoke = False
-    first = False
-    tool_calls: dict[int, dict] = {}
-    async for chunk in stream:
-        delta = chunk.choices[0].delta
-        if delta.content:
-            if not first:
-                print(f"[TIMING] llm: first_token={(time.perf_counter()-t0)*1000:.0f}ms")
-                first = True
-            buffer += delta.content
-            sentences, buffer = _flush_sentences(buffer)
-            for s in sentences:
-                spoke = True
-                yield s
-        if delta.tool_calls:
-            for tc in delta.tool_calls:
-                slot = tool_calls.setdefault(tc.index, {"name": "", "args": ""})
-                if tc.function and tc.function.name:
-                    slot["name"] = tc.function.name
-                if tc.function and tc.function.arguments:
-                    slot["args"] += tc.function.arguments
-
-    tail = buffer.strip()
-    if tail:
-        spoke = True
-        yield tail
-    confirmations = _run_tool_calls(tool_calls)
-    if not spoke:
-        for c in (confirmations or [_NO_ACTION]):
-            yield c
-
-
-async def _nonstream_attempt(client, messages) -> AsyncIterator[str]:
-    """Reliable fallback: one non-streaming call, run tools, yield the reply.
-    Used if streaming errors (e.g. the llama-3.3 streaming+tools Groq bug)."""
-    resp = await client.chat.completions.create(
-        model=MODEL, messages=messages, tools=_TOOLS, tool_choice="auto",
-        max_tokens=MAX_TOKENS, temperature=0.3,
-    )
-    msg = resp.choices[0].message
-    tool_calls = {i: {"name": tc.function.name, "args": tc.function.arguments or ""}
-                  for i, tc in enumerate(msg.tool_calls or [])}
-    confirmations = _run_tool_calls(tool_calls)
-    content = (msg.content or "").strip()
-    if content:
-        sentences, tail = _flush_sentences(content + " ")
-        for s in sentences:
-            yield s
-        if tail.strip():
-            yield tail.strip()
-    else:
-        for c in (confirmations or [_NO_ACTION]):
-            yield c
+    try:
+        stream = await client.chat.completions.create(
+            model=COMPOUND_MODEL,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": transcript}],
+            max_tokens=220, temperature=0.3, stream=True,
+        )
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                if first:
+                    print(f"[TIMING] answer first_token={(time.perf_counter()-t0)*1000:.0f}ms")
+                    first = False
+                buffer += delta.content
+                sentences, buffer = _flush_sentences(buffer)
+                for s in sentences:
+                    spoke = True
+                    yield s
+        tail = buffer.strip()
+        if tail:
+            spoke = True
+            yield tail
+        if not spoke:
+            yield "Sorry, I don't have the answer to that."
+    except Exception as e:
+        msg = str(e)
+        print(f"[AGENT] answer failed: {msg[:120]}")
+        if "rate_limit" in msg or "429" in msg:
+            yield "I'm getting a lot of requests right now — please ask again in a moment."
+        else:
+            yield "Sorry, I'm having trouble reaching the web right now."
 
 
 async def stream_reply(transcript: str) -> AsyncIterator[str]:
-    """Stream the spoken reply for one user turn, sentence by sentence.
+    """Produce Sunday's spoken reply for one turn, yielded sentence by sentence.
 
-    Yields each complete sentence as soon as it's ready (so TTS can start early) and
-    executes tool calls against the database. If the streaming request fails before any
-    audio is produced, it transparently falls back to a non-streaming call.
+    Two paths:
+      • An action (add todo/note/reminder, remember a fact) -> do it, speak a confirmation.
+      • Anything else (a question, chit-chat, weather, news, sports...) -> answer it using
+        the web-enabled model, with web search, falling back to "I don't have the answer".
     """
     client = _get_client()
     t0 = time.perf_counter()
-    messages = _build_messages(transcript)
-    yielded = False
-    try:
-        async for s in _stream_attempt(client, messages, t0):
-            yielded = True
-            yield s
-    except Exception as e:
-        print(f"[AGENT] streaming failed ({str(e)[:90]}); retrying non-streaming")
-        if yielded:
-            return   # already spoke part of a reply; don't double up
-        async for s in _nonstream_attempt(client, messages):
-            yield s
+
+    tool_calls = await _classify_action(client, transcript)
+    if tool_calls:
+        print(f"[TIMING] action classified in {(time.perf_counter()-t0)*1000:.0f}ms")
+        confirmations = _run_tool_calls(tool_calls)
+        for c in (confirmations or [_NO_ACTION]):
+            yield c
+        return
+
+    async for s in _answer_question(client, transcript):
+        yield s

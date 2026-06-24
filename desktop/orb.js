@@ -13,8 +13,7 @@ let lastTurn = 0;
 let hideTimer = null;
 let running = false;     // is hands-free listening on?
 
-// Click the orb -> open the dashboard window (handled in the main process).
-document.getElementById('orb').addEventListener('click', () => window.sunday?.openDashboard());
+// The orb is a drag handle (move the window). Open the dashboard from the hover menu.
 
 // Hover menu buttons.
 const mWake = document.getElementById('m-wake');

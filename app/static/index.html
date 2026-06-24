@@ -1,0 +1,248 @@
+<!doctype html>
+<!--
+  Sunday — Test Console.
+  A tiny local UI for testing the voice pipeline without the terminal.
+  Recording happens on the SERVER (the FastAPI sidecar uses the machine's mic), so this
+  page just triggers the existing endpoints and shows the results + diagnostics.
+  Served by FastAPI at GET / (see app/main.py).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sunday — Test Console</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#262b36; --txt:#e6e9ef; --mut:#8b93a3;
+          --acc:#6ea8fe; --good:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; padding:28px 18px 60px; }
+  h1 { font-size:22px; margin:0 0 2px; }
+  h1 .dot { display:inline-block; width:10px; height:10px; border-radius:50%;
+            background:var(--mut); margin-right:8px; vertical-align:middle; }
+  .sub { color:var(--mut); margin:0 0 22px; font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:16px 18px; margin-bottom:16px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
+             color:var(--mut); margin:0 0 12px; }
+  button { background:var(--acc); color:#08121f; border:0; border-radius:8px;
+           padding:10px 16px; font-size:14px; font-weight:600; cursor:pointer; }
+  button.sec { background:#222734; color:var(--txt); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .big { font-size:16px; padding:14px 22px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  input[type=text] { flex:1; min-width:200px; background:#0f1320; border:1px solid var(--line);
+           color:var(--txt); border-radius:8px; padding:10px 12px; font-size:14px; }
+  .kv { display:flex; gap:8px; margin:6px 0; }
+  .kv .k { color:var(--mut); min-width:90px; }
+  .kv .v { color:var(--txt); }
+  .badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:13px;
+           font-weight:700; background:#1d2740; color:var(--acc); }
+  .note { font-size:13px; padding:10px 12px; border-radius:8px; margin-top:10px; }
+  .note.warn { background:#2a230f; color:var(--warn); border:1px solid #4a3c14; }
+  .note.bad  { background:#2a1414; color:var(--bad);  border:1px solid #4a1f1f; }
+  .muted { color:var(--mut); }
+  pre#log { background:#0c0e13; border:1px solid var(--line); border-radius:8px;
+            padding:12px; height:160px; overflow:auto; font-size:12px; margin:0;
+            white-space:pre-wrap; color:#9fb3c8; }
+  .hint { color:var(--mut); font-size:12px; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="dot" id="health-dot"></span>Sunday — Test Console</h1>
+  <p class="sub">Local pipeline tester. The mic is recorded on the server side; click and speak.</p>
+
+  <!-- VOICE: one turn -->
+  <div class="card">
+    <h2>Voice — single turn</h2>
+    <div class="row">
+      <button id="listen-btn" class="big" onclick="doListen()">🎤 Listen &amp; reply</button>
+      <span id="listen-state" class="muted"></span>
+    </div>
+    <div id="listen-result" style="margin-top:14px; display:none;">
+      <div class="kv"><span class="k">You said</span><span class="v" id="r-transcript">—</span></div>
+      <div class="kv"><span class="k">Sunday</span><span class="v" id="r-reply">—</span></div>
+      <div class="kv"><span class="k">Latency</span><span class="v"><span class="badge" id="r-latency">—</span> <span class="muted">stop-talking → first audio</span></span></div>
+      <div class="kv"><span class="k">Steps</span><span class="v muted" id="r-steps">—</span></div>
+      <div class="kv"><span class="k">Signal</span><span class="v muted" id="r-signal">—</span></div>
+      <div id="r-note" class="note warn" style="display:none;"></div>
+    </div>
+    <div class="hint">Tip: speak right after you click. If it never triggers, lower <code>VAD_THRESHOLD</code> in <code>.env</code>.</div>
+  </div>
+
+  <!-- TEXT -->
+  <div class="card">
+    <h2>Text — type a command</h2>
+    <div class="row">
+      <input type="text" id="chat-in" placeholder="add milk to my todo list" onkeydown="if(event.key==='Enter')doChat()" />
+      <button onclick="doChat()">Send</button>
+    </div>
+    <div class="kv" id="chat-result" style="margin-top:12px; display:none;">
+      <span class="k">Sunday</span><span class="v" id="c-reply">—</span>
+    </div>
+  </div>
+
+  <!-- HANDS-FREE -->
+  <div class="card">
+    <h2>Hands-free — wake word "Sunday"</h2>
+    <div class="row">
+      <button id="wake-start" class="sec" onclick="wake('start')">Start</button>
+      <button id="wake-stop" class="sec" onclick="wake('stop')">Stop</button>
+      <span id="wake-state" class="muted">checking…</span>
+    </div>
+    <div class="hint">Say "Sunday", wait for the beep, then your command. What you said + the timing appear below.</div>
+    <div id="wake-turn" style="margin-top:14px; display:none;">
+      <div class="kv"><span class="k">You said</span><span class="v" id="w-transcript">—</span></div>
+      <div class="kv"><span class="k">Sunday</span><span class="v" id="w-reply">—</span></div>
+      <div class="kv"><span class="k">Steps</span><span class="v muted" id="w-steps">—</span></div>
+      <div class="kv"><span class="k">wake → answer</span><span class="v"><span class="badge" id="w-total">—</span></span></div>
+    </div>
+  </div>
+
+  <!-- DIAGNOSTICS -->
+  <div class="card">
+    <h2>Diagnostics</h2>
+    <div class="row">
+      <button class="sec" onclick="checkDevices()">List mic devices</button>
+      <button id="mic-btn" class="sec" onclick="micTest()">Mic test (4s — speak)</button>
+      <span id="dev-default" class="muted"></span>
+    </div>
+    <div id="mic-result" class="note" style="display:none; margin-top:10px;"></div>
+    <pre id="log" style="margin-top:12px;"></pre>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function log(msg){ const l=$('log'); l.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`; l.scrollTop=l.scrollHeight; }
+
+// Build a "STT 270 · LLM 240 · TTS 310 · first-audio 1080 · total 1200 (ms)" line.
+function renderSteps(o){
+  const p=[];
+  if(o.stt_ms!=null) p.push('STT '+o.stt_ms);
+  if(o.llm_ms!=null) p.push('LLM '+o.llm_ms);
+  if(o.tts_ms!=null) p.push('TTS '+o.tts_ms);
+  if(o.first_audio_ms!=null) p.push('first-audio '+o.first_audio_ms);
+  if(o.turn_total_ms!=null) p.push('total '+o.turn_total_ms);
+  return p.length ? p.join(' · ')+' (ms)' : '—';
+}
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+// ---- health ----
+(async ()=>{ try{ await api('/health'); $('health-dot').style.background='var(--good)'; }
+             catch{ $('health-dot').style.background='var(--bad)'; log('server unreachable'); } })();
+
+// ---- single voice turn ----
+async function doListen(){
+  $('listen-btn').disabled = true;
+  $('listen-state').textContent = '● listening — speak now…';
+  log('listen: recording…');
+  try {
+    const d = await api('/listen', {method:'POST'});
+    $('listen-result').style.display='block';
+    $('r-transcript').textContent = d.transcript || '—';
+    $('r-reply').textContent = d.reply || '—';
+    $('r-latency').textContent = (d.first_audio_ms != null) ? d.first_audio_ms + ' ms' : '—';
+    $('r-steps').textContent = renderSteps(d);
+    const rms = d.max_rms!=null ? d.max_rms.toFixed(4) : '?';
+    const prob = d.max_prob!=null ? d.max_prob.toFixed(2) : '?';
+    $('r-signal').textContent = `max_rms=${rms}  max_speech_prob=${prob}`;
+    const note = $('r-note');
+    if (d.note) {
+      note.style.display='block';
+      note.className = 'note ' + (d.max_rms!=null && d.max_rms < 0.005 ? 'bad' : 'warn');
+      note.textContent = d.note;
+      log('listen: ' + d.note);
+    } else {
+      note.style.display='none';
+      log(`listen ok: "${d.transcript}" → "${d.reply}" (${d.first_audio_ms} ms)`);
+    }
+  } catch(e){ log('listen error: ' + e.message); }
+  finally { $('listen-btn').disabled=false; $('listen-state').textContent=''; }
+}
+
+// ---- text ----
+async function doChat(){
+  const msg = $('chat-in').value.trim();
+  if(!msg) return;
+  log('chat: ' + msg);
+  try {
+    const d = await api('/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+                                  body: JSON.stringify({message: msg})});
+    $('chat-result').style.display='flex';
+    $('c-reply').textContent = d.reply;
+    log('chat reply: ' + d.reply);
+  } catch(e){ log('chat error: ' + e.message); }
+}
+
+// ---- wake ----
+async function wake(action){
+  try {
+    const d = await api('/wake/' + action, {method:'POST'});
+    log('wake/' + action + ': ' + JSON.stringify(d));
+    if (d.status === 'error') $('wake-state').textContent = '⚠ ' + d.detail.split('\n')[0];
+    refreshWake();
+  } catch(e){ log('wake error: ' + e.message); }
+}
+let lastTurn = 0;
+async function refreshWake(){
+  try {
+    const d = await api('/wake/status');
+    $('wake-state').textContent = (d.running ? '🟢 running — say "Sunday"' : '⚪ stopped');
+    // A new completed turn? Show what was heard + the per-step timing.
+    if (d.turn && d.turn !== lastTurn && d.transcript !== undefined){
+      lastTurn = d.turn;
+      $('wake-turn').style.display = 'block';
+      $('w-transcript').textContent = d.transcript || '(didn’t catch that)';
+      $('w-reply').textContent = d.reply || '—';
+      $('w-steps').textContent = renderSteps(d);
+      const total = (d.wake_to_answer_ms != null) ? d.wake_to_answer_ms
+                  : (d.first_audio_ms != null) ? d.first_audio_ms : null;
+      $('w-total').textContent = (total != null ? total + ' ms' : '—');
+      log(`[wake turn] heard: "${d.transcript}" → "${d.reply}"  (${renderSteps(d)})`);
+    }
+  } catch{ $('wake-state').textContent = '—'; }
+}
+setInterval(refreshWake, 1200); refreshWake();
+
+// ---- mic test ----
+async function micTest(){
+  $('mic-btn').disabled = true;
+  const box = $('mic-result');
+  box.style.display='block'; box.className='note warn';
+  box.textContent='● recording 4s — speak a sentence now…';
+  log('mic-test: recording 4s, speak now');
+  try {
+    const d = await api('/mic-test', {method:'POST'});
+    const bars = (d.timeline||[]).map(p => p>=d.threshold ? '█' : (p>0.2?'▄':'.')).join('');
+    box.className = 'note ' + (d.clipping ? 'bad' : (d.frames_over_threshold>0 ? 'warn' : 'bad'));
+    box.innerHTML = `<b>${d.verdict}</b><br>` +
+      `peak=${d.peak} ${d.clipping?'⚠ CLIPPING':''} · rms=${d.rms} · dc=${d.dc} · ` +
+      `max_prob=${d.max_prob} · frames over ${d.threshold}: ${d.frames_over_threshold}<br>` +
+      `VAD timeline: <code>${bars}</code><br>` +
+      `<span class="muted">saved ${d.wav}</span>`;
+    log(`mic-test: peak=${d.peak} max_prob=${d.max_prob} over=${d.frames_over_threshold} → ${d.verdict}`);
+  } catch(e){ box.className='note bad'; box.textContent='mic-test error: '+e.message; log('mic-test error: '+e.message); }
+  finally { $('mic-btn').disabled=false; }
+}
+
+// ---- devices ----
+async function checkDevices(){
+  try {
+    const d = await api('/audio-devices');
+    log('input devices:');
+    d.inputs.forEach(x => log(`  [${x.index}] ${x.name} (${x.channels}ch)${x.index===d.default_input?'  ← default':''}`));
+    $('dev-default').textContent = 'default input index: ' + d.default_input;
+  } catch(e){ log('devices error: ' + e.message); }
+}
+</script>
+</body>
+</html>

@@ -4,3 +4,12 @@ __pycache__/
 venv/
 .venv/
 bujji.db
+
+# Wake-word training data & artifacts (large + regenerable — see scripts/train_livekit_wakeword.md)
+data/
+output/
+scripts/training_samples/
+scripts/openww_data/
+
+# Debug/scratch audio
+debug_mic.wav

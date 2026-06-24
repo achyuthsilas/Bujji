@@ -1,0 +1,72 @@
+# livekit-wakeword training config for Sunday's "Sunday" / "Hey Sunday" wake word.
+#
+# Tuned smaller than livekit's prod.yaml so it can train on a CPU-only machine in a
+# reasonable time. Bump n_samples / steps / model_size for higher accuracy if you have
+# a GPU (or run it on a cloud GPU — same config works).
+#
+# See scripts/train_livekit_wakeword.md for the step-by-step.
+
+# Exported model is named after this (output/<model_name>.onnx).
+model_name: sunday
+
+# What to detect. Include the bare word and the "hey" variant.
+target_phrases: ["sunday", "hey sunday"]
+
+# ── Data generation (reduced for local/CPU; prod uses 25000) ──────────────────
+n_samples: 5000
+n_samples_val: 1000
+n_background_samples: 1000
+n_background_samples_val: 200
+tts_batch_size: 50
+
+# Phonetically-similar phrases that must NOT trigger (reduces false wakes).
+custom_negative_phrases:
+  - "someday"
+  - "some day"
+  - "one day"
+  - "fun day"
+  - "sundae"
+  - "sundial"
+  - "sundown"
+  - "sunny"
+  - "monday"
+  - "sandy"
+  - "hey monday"
+  - "hey sunny"
+  - "day"
+
+# ── TTS variability (VITS + SLERP speaker blending) ───────────────────────────
+noise_scales: [0.98]
+noise_scale_ws: [0.98]
+length_scales: [0.75, 1.0, 1.25]
+slerp_weights: [0.2, 0.35, 0.5, 0.65, 0.8]
+
+# ── Paths (relative to where you run the CLI — the project root) ──────────────
+data_dir: ./data       # `setup` downloads Piper, backgrounds, RIRs, ACAV100M features here
+output_dir: ./output   # generated audio, features, checkpoints, exported model
+
+# ── Augmentation ──────────────────────────────────────────────────────────────
+augmentation:
+  clip_duration: 2.0
+  batch_size: 16
+  rounds: 2
+  background_paths: [./data/backgrounds]
+  rir_paths: [./data/rirs]
+
+# ── Model (conv-attention is the most accurate head; 'small' is CPU-friendly) ─
+model:
+  model_type: conv_attention
+  model_size: small
+
+# ── Training (reduced for local; prod uses 100000) ────────────────────────────
+steps: 20000
+learning_rate: 0.0001
+weight_decay: 0.01
+label_smoothing: 0.05
+max_negative_weight: 1500
+target_fp_per_hour: 0.5
+batch_n_per_class:
+  positive: 50
+  adversarial_negative: 50
+  ACAV100M_sample: 512
+  background_noise: 50

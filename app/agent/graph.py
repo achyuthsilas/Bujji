@@ -1,4 +1,5 @@
 # Bujji's agent. Asks the LLM to classify intent as JSON, then calls the right tool.
+# Also extracts user preferences in the same pass and stores them in SQLite.
 # Avoids LangChain tool-binding (unreliable across model versions) in favour of
 # a plain JSON parse → direct function call pattern.
 
@@ -8,34 +9,50 @@ from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_ollama import ChatOllama
 from langchain_groq import ChatGroq
-from app.agent.database import insert_todo, insert_note, insert_reminder
+from app.agent.database import (
+    insert_todo, insert_note, insert_reminder,
+    upsert_preference, load_preferences,
+)
 
 load_dotenv()
 
-# The LLM is only asked to classify and extract — no tool-binding involved.
-CLASSIFY_PROMPT = """You are Bujji, a personal assistant. Classify the user's message into one of these intents and extract the relevant text.
+# Base prompt — user preferences are prepended at call time via _build_system_prompt().
+_CLASSIFY_BASE = """You are Sunday, a personal assistant. Do two things in one reply:
+1. Classify the user's intent.
+2. If the message reveals a personal fact or preference (name, location, job, habit, preference), capture it.
 
-Reply with ONLY valid JSON in this exact format — nothing else:
-{"intent": "<intent>", "content": "<extracted text>", "remind_at": "<time or null>"}
+Reply with ONLY valid JSON — nothing else:
+{"intent": "<intent>", "content": "<extracted text>", "remind_at": "<time or null>", "preference": {"key": "<short label>", "value": "<fact>"} or null}
 
 Intents:
-- "add_todo"    → user wants to add a task or to-do item
-- "add_note"    → user wants to save a note or remember information
-- "set_reminder"→ user mentions a time or says "remind me"
-- "unknown"     → anything else
+- "add_todo"     → user wants to add a task or to-do item
+- "add_note"     → user wants to save a note or remember information
+- "set_reminder" → user mentions a time or says "remind me"
+- "unknown"      → anything else
 
 Examples:
 User: "add milk to my todo list"
-{"intent": "add_todo", "content": "milk", "remind_at": null}
+{"intent": "add_todo", "content": "milk", "remind_at": null, "preference": null}
 
 User: "remind me to call mom at 5pm"
-{"intent": "set_reminder", "content": "call mom", "remind_at": "5pm"}
+{"intent": "set_reminder", "content": "call mom", "remind_at": "5pm", "preference": null}
 
-User: "save a note that I prefer dark mode"
-{"intent": "add_note", "content": "I prefer dark mode", "remind_at": null}
+User: "my name is Arjun, remind me to take meds at 8am"
+{"intent": "set_reminder", "content": "take meds", "remind_at": "8am", "preference": {"key": "name", "value": "Arjun"}}
+
+User: "I prefer dark mode"
+{"intent": "unknown", "content": "", "remind_at": null, "preference": {"key": "ui preference", "value": "dark mode"}}
 
 User: "what is the weather"
-{"intent": "unknown", "content": "", "remind_at": null}"""
+{"intent": "unknown", "content": "", "remind_at": null, "preference": null}"""
+
+
+def _build_system_prompt() -> str:
+    prefs = load_preferences()
+    if not prefs:
+        return _CLASSIFY_BASE
+    facts = "\n".join(f"  - {p['key']}: {p['value']}" for p in prefs)
+    return f"What you know about the user:\n{facts}\n\n{_CLASSIFY_BASE}"
 
 
 def _build_llm():
@@ -64,7 +81,7 @@ def _get_llm():
 
 def _classify(message: str) -> dict:
     response = _get_llm().invoke([
-        SystemMessage(content=CLASSIFY_PROMPT),
+        SystemMessage(content=_build_system_prompt()),
         HumanMessage(content=message),
     ])
     raw = response.content.strip()
@@ -76,25 +93,45 @@ def _classify(message: str) -> dict:
     return json.loads(raw.strip())
 
 
+def _name_from_prefs() -> str | None:
+    prefs = load_preferences()
+    for p in prefs:
+        if p["key"] in ("name", "user name", "my name"):
+            return p["value"]
+    return None
+
+
 def run_agent(message: str) -> str:
     result = _classify(message)
     intent = result.get("intent", "unknown")
     content = result.get("content", "").strip()
     remind_at = result.get("remind_at") or None
+    pref = result.get("preference")
 
-    print(f"  [AGENT] intent={intent!r} content={content!r} remind_at={remind_at!r}")
+    print(f"  [AGENT] intent={intent!r} content={content!r} remind_at={remind_at!r} pref={pref!r}")
+
+    # Save any detected preference before replying
+    if isinstance(pref, dict) and pref.get("key") and pref.get("value"):
+        upsert_preference(pref["key"], pref["value"])
+        print(f"  [MEMORY] saved: {pref['key']!r} = {pref['value']!r}")
+
+    name = _name_from_prefs()
+    greeting = f"{name}! " if name else ""
 
     if intent == "add_todo":
-        row_id = insert_todo(content)
-        return f"Got it! I've added '{content}' to your todo list."
+        insert_todo(content)
+        return f"Got it, {greeting}I've added '{content}' to your todo list."
 
     if intent == "add_note":
-        row_id = insert_note(content)
-        return f"Noted! I've saved: '{content}'."
+        insert_note(content)
+        return f"Noted, {greeting}I've saved: '{content}'."
 
     if intent == "set_reminder":
-        row_id = insert_reminder(content, remind_at)
+        insert_reminder(content, remind_at)
         when = f" for {remind_at}" if remind_at else ""
-        return f"Done! I've set a reminder{when}: '{content}'."
+        return f"Done, {greeting}I've set a reminder{when}: '{content}'."
+
+    if pref:
+        return f"Got it, I'll remember that."
 
     return "Sorry, I can only add todos, notes, and reminders right now."

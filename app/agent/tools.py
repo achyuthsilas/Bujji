@@ -1,4 +1,4 @@
-# The three actions Bujji can take. Each is a LangChain tool the agent can call.
+# The three actions Sunday can take. Each is a LangChain tool the agent can call.
 # add_todo, add_note, set_reminder — nothing else for v1.
 
 from langchain_core.tools import tool

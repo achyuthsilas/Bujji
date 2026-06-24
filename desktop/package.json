@@ -1,0 +1,12 @@
+{
+  "name": "sunday-desktop",
+  "version": "0.1.0",
+  "description": "Sunday voice assistant — desktop app (glowing orb + dashboard)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

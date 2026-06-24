@@ -82,3 +82,29 @@ def load_preferences() -> list[dict]:
             "SELECT key, value FROM preferences ORDER BY updated_at DESC LIMIT 30"
         ).fetchall()
     return [{"key": row["key"], "value": row["value"]} for row in rows]
+
+
+# ── Read helpers for the desktop dashboard (newest first) ─────────────────────
+def list_todos(limit: int = 100) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, task, done, created FROM todos ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_notes(limit: int = 100) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, content, created FROM notes ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_reminders(limit: int = 100) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, content, remind_at, created FROM reminders ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]

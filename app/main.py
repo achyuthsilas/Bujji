@@ -14,7 +14,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.agent.database import init_db
+from app.agent.database import (
+    init_db, list_todos, list_notes, list_reminders,
+)
 from app.agent.graph import run_agent
 from app.voice import pipeline
 
@@ -57,6 +59,29 @@ def index():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/state")
+def state():
+    """Live state for the desktop orb: idle | listening | thinking | speaking,
+    plus the last turn's transcript/reply/timings (for the pop-out)."""
+    return {"state": pipeline.get_state(), "running": pipeline.is_running(),
+            **pipeline.last_metrics()}
+
+
+@app.get("/todos")
+def todos():
+    return {"items": list_todos()}
+
+
+@app.get("/notes")
+def notes():
+    return {"items": list_notes()}
+
+
+@app.get("/reminders")
+def reminders():
+    return {"items": list_reminders()}
 
 
 @app.post("/mic-test")

@@ -13,3 +13,15 @@ scripts/openww_data/
 
 # Debug/scratch audio
 debug_mic.wav
+
+# Electron desktop app deps + build output
+node_modules/
+desktop/node_modules/
+desktop/dist/
+dist/
+build/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.log

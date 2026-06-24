@@ -40,6 +40,18 @@ _continuous_task: asyncio.Task | None = None
 _last_metrics: dict = {}
 _last_wake_ts: float | None = None   # perf_counter when the wake word last fired
 
+# Live state for the desktop orb's glow: idle | listening | thinking | speaking.
+_state = "idle"
+
+
+def _set_state(s: str) -> None:
+    global _state
+    _state = s
+
+
+def get_state() -> str:
+    return _state
+
 
 # ── earcon ───────────────────────────────────────────────────────────────────
 def _beep() -> None:
@@ -69,6 +81,7 @@ def _wait_for_wake() -> bool:
     from app.voice.wake import get_engine   # lazy: only needed for hands-free mode
     engine = get_engine()
     print("[WAKE] Listening for 'Sunday'...")
+    _set_state("idle")
     deadline = time.monotonic() + 3600
     with sd.InputStream(samplerate=MIC_RATE, channels=1, dtype="float32",
                         blocksize=FRAME_SAMPLES) as stream:
@@ -86,6 +99,7 @@ def _wait_for_wake() -> bool:
 def _capture_speech() -> tuple[np.ndarray | None, float, dict]:
     """Record one utterance using Silero VAD, ending on ~400ms of silence.
     Returns (audio, t_stop, diag); audio is None if nothing usable was heard."""
+    _set_state("listening")
     vad = SileroVAD(silence_ms=400)
     captured: list[np.ndarray] = []
     started = False
@@ -194,6 +208,7 @@ async def _play_stage(play_q: asyncio.Queue, t_stop: float, timing: dict) -> Non
             timing["first_audio_ms"] = round((time.perf_counter() - t_stop) * 1000)
             print(f"[TIMING] *** first_audio = {timing['first_audio_ms']}ms "
                   f"(stop-talking -> first audio) ***")
+            _set_state("speaking")
             first = False
         # Sequential playback keeps sentences in order; we await each clip fully.
         await asyncio.to_thread(_play_blocking, pcm)
@@ -215,6 +230,7 @@ def _publish(metrics: dict) -> None:
 async def _handle_turn(utterance: np.ndarray, t_stop: float) -> dict:
     """Run one full turn from buffered audio to spoken reply. Returns transcript + reply
     and publishes per-step timings + transcript for the UI."""
+    _set_state("thinking")
     timing: dict = {}
     transcript = await asyncio.to_thread(stt.transcribe, utterance)
     timing["stt_ms"] = round((time.perf_counter() - t_stop) * 1000)
@@ -224,6 +240,7 @@ async def _handle_turn(utterance: np.ndarray, t_stop: float) -> dict:
         await asyncio.to_thread(_play_blocking, tts.synth_sentence("Sorry, I didn't catch that."))
         result = {"transcript": "", "reply": "Sorry, I didn't catch that.", **timing}
         _publish(result)
+        _set_state("idle")
         return result
 
     tts_q: asyncio.Queue = asyncio.Queue()
@@ -241,6 +258,7 @@ async def _handle_turn(utterance: np.ndarray, t_stop: float) -> dict:
     print(f"[TIMING] turn_total = {timing['turn_total_ms']}ms")
     result = {"transcript": transcript, "reply": reply, **timing}
     _publish(result)
+    _set_state("idle")
     return result
 
 
@@ -276,6 +294,8 @@ async def _continuous_loop() -> None:
                       f"(includes you speaking the command) ***")
         except Exception as e:
             print(f"[PIPELINE] turn error: {e}")
+            _set_state("idle")
+    _set_state("idle")
     print("[PIPELINE] Continuous mode stopped.")
 
 

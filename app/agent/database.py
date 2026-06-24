@@ -1,4 +1,4 @@
-# Sets up the SQLite database and creates the three tables Bujji needs.
+# Sets up the SQLite database and creates the four tables Sunday needs.
 # Call init_db() once at startup to make sure the tables exist.
 
 import sqlite3
@@ -35,6 +35,12 @@ def init_db() -> None:
                 remind_at TEXT,
                 created   TEXT    NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS preferences (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
 
 
@@ -57,3 +63,48 @@ def insert_reminder(content: str, remind_at: str | None = None) -> int:
             (content, remind_at),
         )
         return cursor.lastrowid
+
+
+def upsert_preference(key: str, value: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO preferences (key, value, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                              updated_at=excluded.updated_at""",
+            (key.strip().lower(), value.strip()),
+        )
+
+
+def load_preferences() -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT key, value FROM preferences ORDER BY updated_at DESC LIMIT 30"
+        ).fetchall()
+    return [{"key": row["key"], "value": row["value"]} for row in rows]
+
+
+# ── Read helpers for the desktop dashboard (newest first) ─────────────────────
+def list_todos(limit: int = 100) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, task, done, created FROM todos ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_notes(limit: int = 100) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, content, created FROM notes ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_reminders(limit: int = 100) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, content, remind_at, created FROM reminders ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]

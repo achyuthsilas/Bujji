@@ -1,0 +1,34 @@
+<!doctype html>
+<!-- The mini dashboard. One section per topic, read from the backend (created by voice). -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="dashboard.css" />
+</head>
+<body>
+  <header>
+    <div class="title"><span class="dot"></span> Sunday</div>
+    <button id="refresh" title="Refresh">↻ Refresh</button>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>✅ To-dos <span class="count" id="todos-count"></span></h2>
+      <ul id="todos" class="list"></ul>
+    </section>
+
+    <section class="card">
+      <h2>⏰ Reminders / Schedule <span class="count" id="reminders-count"></span></h2>
+      <ul id="reminders" class="list"></ul>
+    </section>
+
+    <section class="card">
+      <h2>📝 Notes <span class="count" id="notes-count"></span></h2>
+      <ul id="notes" class="list"></ul>
+    </section>
+  </main>
+
+  <footer id="status">—</footer>
+  <script src="dashboard.js"></script>
+</body>
+</html>

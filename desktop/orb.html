@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- The glowing orb window. Glows by Sunday's state, pops out the last thing you said +
+     her reply, and reveals a little menu when you hover it (Start/Stop, Dashboard, Quit). -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="orb.css" />
+</head>
+<body class="idle">
+  <!-- Orb at the top; the hover menu drops down below it (we're in the top corner) -->
+  <div class="orbwrap" id="orbwrap">
+    <div id="orb" class="orb" title="Click to open dashboard">
+      <div class="ring"></div>
+    </div>
+    <div id="label" class="label">off</div>
+    <div id="menu" class="menu">
+      <button id="m-wake">🎤 Start listening</button>
+      <button id="m-dash">📋 Open dashboard</button>
+      <button id="m-quit">✕ Quit Sunday</button>
+    </div>
+  </div>
+
+  <!-- Pop-out bubble: appears below the orb after each turn -->
+  <div id="bubble" class="bubble hidden">
+    <div class="you"><span class="tag">You</span><span id="b-you">…</span></div>
+    <div class="sun"><span class="tag">Sunday</span><span id="b-sun">…</span></div>
+    <div id="b-meta" class="meta"></div>
+  </div>
+
+  <script src="orb.js"></script>
+</body>
+</html>

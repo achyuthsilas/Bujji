@@ -1,25 +1,40 @@
 // Electron main process for Sunday — the "app shell".
-// On launch it makes sure the Python backend (FastAPI) is running, shows the glowing orb,
-// and puts an icon in the system tray. The tray menu lets you turn hands-free on/off, open
-// the dashboard, or quit. Clicking the orb opens the dashboard too.
+// Responsibilities:
+//   • make sure the Python backend (FastAPI) is running, and reliably clean it up
+//   • show the glowing orb + system-tray icon
+//   • remember the orb's position and (optionally) start on Windows login
 //
-// It only starts the backend if one isn't already running, so it won't clash with a uvicorn
-// you started yourself.
+// Backend lifecycle (so a backend never lingers):
+//   - On launch we kill any orphaned backend we started in a previous run (tracked by a
+//     PID file), then start a fresh one — UNLESS a backend you started yourself is already
+//     on :8000, in which case we just reuse it and leave it alone.
+//   - On quit we kill the backend we started.
 
 const { app, BrowserWindow, Tray, Menu, ipcMain, screen } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const { spawn } = require('child_process');
 
 const REPO = path.join(__dirname, '..');
 const API = 'http://localhost:8000';
+const isDev = !app.isPackaged;
 
-let sidecar = null;
+let sidecar = null;      // backend process WE started (null if we reused an external one)
 let orbWin = null;
 let dashWin = null;
 let tray = null;
+let SETTINGS_FILE = null;
+let PID_FILE = null;
+let settings = {};       // { orb: {x,y}, openAtLogin: bool }
 
-// ---- tiny HTTP helpers (talk to the FastAPI backend) ----
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---- settings persistence (small JSON in the app's userData folder) ----
+function loadSettings() { try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); } catch { settings = {}; } }
+function saveSettings() { try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {} }
+
+// ---- HTTP helpers (talk to the backend) ----
 function ping(url) {
   return new Promise((resolve) => {
     const req = http.get(url, (res) => { res.resume(); resolve(res.statusCode === 200); });
@@ -44,23 +59,39 @@ function getJSON(pathname) {
     req.setTimeout(800, () => { req.destroy(); resolve(null); });
   });
 }
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ---- backend lifecycle ----
+// ---- backend process management ----
+function isAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
+function killPid(pid) {
+  if (!pid) return;
+  try { process.kill(pid); } catch {}
+  if (process.platform === 'win32') { try { spawn('taskkill', ['/PID', String(pid), '/T', '/F']); } catch {} }
+}
+function readPid() { try { return parseInt(fs.readFileSync(PID_FILE, 'utf8'), 10); } catch { return null; } }
+
 async function ensureBackend() {
-  if (await ping(API + '/health')) { console.log('[sunday] backend already running'); return; }
+  if (await ping(API + '/health')) { console.log('[sunday] reusing a backend already on :8000'); return; }
   const py = process.platform === 'win32'
     ? path.join(REPO, 'venv', 'Scripts', 'python.exe')
     : path.join(REPO, 'venv', 'bin', 'python');
   console.log('[sunday] starting backend:', py);
-  sidecar = spawn(py, ['-m', 'uvicorn', 'app.main:app', '--port', '8000'],
-                  { cwd: REPO, stdio: 'inherit' });
+  sidecar = spawn(py, ['-m', 'uvicorn', 'app.main:app', '--port', '8000'], { cwd: REPO, stdio: 'inherit' });
   sidecar.on('error', (e) => console.error('[sunday] failed to start backend:', e.message));
+  try { fs.writeFileSync(PID_FILE, String(sidecar.pid)); } catch {}
   for (let i = 0; i < 60; i++) {
     if (await ping(API + '/health')) { console.log('[sunday] backend up'); return; }
     await sleep(500);
   }
   console.error('[sunday] backend did not respond in time');
+}
+
+// ---- auto-start on login ----
+function getOpenAtLogin() { return app.getLoginItemSettings().openAtLogin; }
+function setOpenAtLogin(on) {
+  const opts = { openAtLogin: on };
+  if (isDev) { opts.path = process.execPath; opts.args = [path.resolve(__dirname)]; }  // launch this app folder
+  app.setLoginItemSettings(opts);
+  settings.openAtLogin = on; saveSettings();
 }
 
 // ---- windows ----
@@ -73,9 +104,17 @@ function createOrb() {
                       contextIsolation: true, nodeIntegration: false },
   });
   orbWin.loadFile(path.join(__dirname, 'orb.html'));
-  // Pin to the TOP-right corner of the work area (orb itself is top/right-aligned).
-  const { workArea } = screen.getPrimaryDisplay();
-  orbWin.setPosition(workArea.x + workArea.width - 300, workArea.y);
+
+  // Restore saved position, else top-right. Clamp into the work area so it can't get lost.
+  const wa = screen.getPrimaryDisplay().workArea;
+  let x = (settings.orb && Number.isInteger(settings.orb.x)) ? settings.orb.x : (wa.x + wa.width - 300);
+  let y = (settings.orb && Number.isInteger(settings.orb.y)) ? settings.orb.y : wa.y;
+  x = Math.min(Math.max(x, wa.x), wa.x + wa.width - 60);
+  y = Math.min(Math.max(y, wa.y), wa.y + wa.height - 60);
+  orbWin.setPosition(Math.round(x), Math.round(y));
+
+  // Remember where you drag it to.
+  orbWin.on('moved', () => { const [px, py] = orbWin.getPosition(); settings.orb = { x: px, y: py }; saveSettings(); });
   orbWin.on('closed', () => { orbWin = null; });
 }
 
@@ -99,22 +138,21 @@ function toggleOrb() {
 function buildTray() {
   tray = new Tray(path.join(__dirname, 'assets', 'tray.png'));
   tray.setToolTip('Sunday');
-  tray.on('click', openDashboard);                         // left-click → dashboard
-  tray.on('right-click', () => tray.popUpContextMenu());   // explicit (Windows robustness)
+  tray.on('click', openDashboard);
+  tray.on('right-click', () => tray.popUpContextMenu());
   updateTray({ running: false, state: 'idle' });
 }
-
 function updateTray(d) {
   const running = !!d.running;
   const orbShown = orbWin && orbWin.isVisible();
   const menu = Menu.buildFromTemplate([
     { label: `Sunday — ${running ? '● ' + (d.state || 'on') : 'off'}`, enabled: false },
     { type: 'separator' },
-    running
-      ? { label: 'Stop listening', click: () => post('/wake/stop') }
-      : { label: 'Start listening  (say "Sunday")', click: () => post('/wake/start') },
+    running ? { label: 'Stop listening', click: () => post('/wake/stop') }
+            : { label: 'Start listening  (say "Sunday")', click: () => post('/wake/start') },
     { label: 'Open dashboard', click: openDashboard },
     { label: orbShown ? 'Hide orb' : 'Show orb', click: toggleOrb },
+    { type: 'checkbox', label: 'Start at login', checked: getOpenAtLogin(), click: (mi) => setOpenAtLogin(mi.checked) },
     { type: 'separator' },
     { label: 'Quit Sunday', click: () => { app.isQuitting = true; app.quit(); } },
   ]);
@@ -129,13 +167,25 @@ ipcMain.on('quit-app', () => { app.isQuitting = true; app.quit(); });
 
 // ---- app lifecycle ----
 app.whenReady().then(async () => {
+  SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
+  PID_FILE = path.join(app.getPath('userData'), 'backend.pid');
+  loadSettings();
+
+  // Clean up a backend orphaned by a previous run (e.g. after a crash).
+  const orphan = readPid();
+  if (orphan && isAlive(orphan)) { console.log('[sunday] cleaning orphaned backend', orphan); killPid(orphan); await sleep(1200); }
+  try { fs.unlinkSync(PID_FILE); } catch {}
+
+  // First run: default to starting on login (you asked for "always there").
+  if (settings.openAtLogin === undefined) settings.openAtLogin = true;
+  setOpenAtLogin(settings.openAtLogin);
+
   await ensureBackend();
   createOrb();
   buildTray();
-  // Keep the tray menu + tooltip in sync with the backend state.
   setInterval(async () => { const d = await getJSON('/state'); if (d) updateTray(d); }, 1000);
 });
 
-// Stay alive in the tray when windows are closed (quit only from the tray menu).
-app.on('window-all-closed', (e) => { /* don't quit */ });
-app.on('before-quit', () => { if (sidecar) sidecar.kill(); });
+// Stay alive in the tray when windows are closed (quit only from the menu).
+app.on('window-all-closed', () => {});
+app.on('before-quit', () => { if (sidecar) killPid(sidecar.pid); try { fs.unlinkSync(PID_FILE); } catch {} });
